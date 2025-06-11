@@ -6,6 +6,10 @@ on:
     - cron: '*/2 * * * *'
   workflow_dispatch: # Allows manual triggering
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   update-playlist:
     runs-on: ubuntu-latest
@@ -14,7 +18,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.PAT_TOKEN }}
         fetch-depth: 1
 
     - name: Setup Node.js
