@@ -123,19 +123,67 @@ jobs:
                 # Add the #EXTINF line
                 echo "$line" >> filtered_playlist.m3u
                 
-                # Read the next line (should be the URL)
-                if IFS= read -r url_line; then
-                  echo "$url_line" >> filtered_playlist.m3u
-                  FOUND_CHANNELS=$((FOUND_CHANNELS + 1))
+                # Read all subsequent lines until we find the actual stream URL
+                while IFS= read -r next_line; do
+                  echo "$next_line" >> filtered_playlist.m3u
+                  
+                  # Check if this line is the stream URL (starts with http/https or ends with stream format)
+                  if [[ $next_line =~ ^https?:// ]] || [[ $next_line =~ \.(m3u8|mpd|ts)(\?.*)?$ ]]; then
+                    # This is the stream URL, we're done with this channel
+                    FOUND_CHANNELS=$((FOUND_CHANNELS + 1))
+                    break
+                  elif [[ $next_line == "#EXTINF"* ]]; then
+                    # We've hit the next channel, need to process this line in next iteration
+                    # Put it back by creating a temp file approach
+                    echo "$next_line" > temp_line.txt
+                    break
+                  fi
+                done
+                
+                # If we found another #EXTINF line, we need to process it
+                if [[ -f temp_line.txt ]]; then
+                  line=$(cat temp_line.txt)
+                  rm temp_line.txt
+                  # Process this #EXTINF line in the next iteration
+                  continue
                 fi
               else
-                # Skip the URL line for unwanted channels
-                IFS= read -r url_line
+                # Skip all lines for unwanted channels until we find the URL or next #EXTINF
+                while IFS= read -r skip_line; do
+                  if [[ $skip_line =~ ^https?:// ]] || [[ $skip_line =~ \.(m3u8|mpd|ts)(\?.*)?$ ]]; then
+                    # Found the URL, skip it and break
+                    break
+                  elif [[ $skip_line == "#EXTINF"* ]]; then
+                    # Found next channel, put it back for processing
+                    echo "$skip_line" > temp_line.txt
+                    break
+                  fi
+                done
+                
+                # If we found another #EXTINF line, process it next
+                if [[ -f temp_line.txt ]]; then
+                  line=$(cat temp_line.txt)
+                  rm temp_line.txt
+                  continue
+                fi
               fi
             else
               echo "⚠️  No tvg-id found in: ${line:0:100}..."
-              # Skip the URL line
-              IFS= read -r url_line
+              # Skip all lines until we find the URL or next #EXTINF
+              while IFS= read -r skip_line; do
+                if [[ $skip_line =~ ^https?:// ]] || [[ $skip_line =~ \.(m3u8|mpd|ts)(\?.*)?$ ]]; then
+                  break
+                elif [[ $skip_line == "#EXTINF"* ]]; then
+                  echo "$skip_line" > temp_line.txt
+                  break
+                fi
+              done
+              
+              if [[ -f temp_line.txt ]]; then
+                line=$(cat temp_line.txt)
+                rm temp_line.txt
+                continue
+              fi
             fi
           fi
         done < source_playlist.m3u
@@ -280,6 +328,7 @@ jobs:
         rm -f filtered_playlist.m3u
         rm -f old_tvg_ids.tmp
         rm -f new_tvg_ids.tmp
+        rm -f temp_line.txt
         
         echo "🧹 Cleanup completed"
 
