@@ -1,0 +1,124 @@
+name: Update M3U Playlist
+
+on:
+  schedule:
+    # Runs every 2 minutes
+    - cron: '*/2 * * * *'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  update-playlist:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 1
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Fetch M3U content
+      run: |
+        echo "Fetching M3U playlist from URL..."
+        
+        # Fetch the M3U content
+        curl -s -L "${{ secrets.M3U_URL }}" > temp_playlist.m3u
+        
+        # Check if download was successful
+        if [ ! -s temp_playlist.m3u ]; then
+          echo "Error: Failed to download M3U playlist or file is empty"
+          exit 1
+        fi
+        
+        echo "Successfully fetched M3U playlist"
+        echo "Playlist contains $(wc -l < temp_playlist.m3u) lines"
+        
+        # Show first few lines for verification (without exposing sensitive data)
+        echo "First 5 lines of playlist:"
+        head -5 temp_playlist.m3u
+
+    - name: Check for changes
+      id: check_changes
+      run: |
+        # Define the target file name
+        TARGET_FILE="playlist.m3u"
+        
+        # Check if target file exists
+        if [ ! -f "$TARGET_FILE" ]; then
+          echo "Target file doesn't exist, will create it"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+        else
+          # Compare files
+          if ! cmp -s temp_playlist.m3u "$TARGET_FILE"; then
+            echo "Changes detected in M3U playlist"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            
+            # Show diff summary
+            echo "=== CHANGES SUMMARY ==="
+            echo "Lines added/modified:"
+            diff --unified=0 "$TARGET_FILE" temp_playlist.m3u | grep "^+" | wc -l
+            echo "Lines removed:"
+            diff --unified=0 "$TARGET_FILE" temp_playlist.m3u | grep "^-" | wc -l
+          else
+            echo "No changes detected in M3U playlist"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: Update playlist file
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        # Move the new content to the target file
+        mv temp_playlist.m3u playlist.m3u
+        
+        echo "Playlist updated successfully"
+        echo "New playlist contains $(wc -l < playlist.m3u) lines"
+
+    - name: Commit and push changes
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Add the updated file
+        git add playlist.m3u
+        
+        # Create commit with timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        CHANNEL_COUNT=$(grep -c "^#EXTINF" playlist.m3u || echo "0")
+        
+        git commit -m "Auto-update M3U playlist - $TIMESTAMP
+
+        📺 Channels: $CHANNEL_COUNT
+        🤖 Updated by GitHub Actions
+        ⏰ Last update: $TIMESTAMP"
+        
+        # Push changes
+        git push
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # Remove temporary files
+        rm -f temp_playlist.m3u
+        
+        echo "Cleanup completed"
+
+    - name: Workflow summary
+      if: always()
+      run: |
+        echo "=== WORKFLOW SUMMARY ==="
+        echo "Status: ${{ job.status }}"
+        echo "Changes detected: ${{ steps.check_changes.outputs.has_changes }}"
+        echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+        
+        if [ -f playlist.m3u ]; then
+          CHANNEL_COUNT=$(grep -c "^#EXTINF" playlist.m3u || echo "0")
+          echo "Current channel count: $CHANNEL_COUNT"
+        fi
