@@ -1,0 +1,313 @@
+name: Update Filtered M3U Channels by TVG-ID Numbers
+
+on:
+  schedule:
+    # Runs every 2 minutes
+    - cron: '*/2 * * * *'
+  workflow_dispatch: # Allows manual triggering
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  update-filtered-playlist:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PAT_TOKEN }}
+        fetch-depth: 1
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Fetch and filter M3U channels by TVG-ID numbers
+      run: |
+        echo "=== FETCHING AND FILTERING M3U CHANNELS BY TVG-ID NUMBERS ==="
+        
+        # Get the M3U source URL
+        M3U_SOURCE="${{ secrets.M3U_URL }}"
+        
+        # Get the TVG-ID numbers filter (space-separated tvg-id numbers)
+        TVG_ID_FILTER="${{ secrets.TVG_ID_NUMBERS }}"
+        
+        # Validate inputs
+        if [ -z "$M3U_SOURCE" ]; then
+          echo "❌ ERROR: M3U_URL secret is empty!"
+          exit 1
+        fi
+        
+        if [ -z "$TVG_ID_FILTER" ]; then
+          echo "❌ ERROR: TVG_ID_NUMBERS secret is empty!"
+          echo "📝 Please add TVG_ID_NUMBERS secret with space-separated numbers"
+          echo "📝 Example: '123 456 789 101112'"
+          exit 1
+        fi
+        
+        echo "🔗 M3U Source: [HIDDEN]"
+        echo "🔢 TVG-ID Numbers: $TVG_ID_FILTER"
+        echo "🔍 Looking for $(echo $TVG_ID_FILTER | wc -w) specific TVG-ID numbers"
+        
+        # Download the source M3U playlist
+        echo "📥 Downloading M3U playlist..."
+        if ! curl -s -L --connect-timeout 30 --max-time 60 "$M3U_SOURCE" > source_playlist.m3u; then
+          echo "❌ ERROR: Failed to download M3U playlist"
+          exit 1
+        fi
+        
+        # Check if download was successful
+        if [ ! -s source_playlist.m3u ]; then
+          echo "❌ ERROR: Downloaded M3U file is empty"
+          exit 1
+        fi
+        
+        TOTAL_LINES=$(wc -l < source_playlist.m3u)
+        TOTAL_CHANNELS=$(grep -c "^#EXTINF" source_playlist.m3u || echo "0")
+        echo "✅ Downloaded: $TOTAL_LINES lines, $TOTAL_CHANNELS total channels"
+
+    - name: Filter channels by specific TVG-ID numbers
+      run: |
+        echo "=== FILTERING CHANNELS BY TVG-ID NUMBERS ==="
+        
+        # Create filtered playlist with header
+        cat > filtered_playlist.m3u << 'EOF'
+        #EXTM3U
+        #PLAYLIST:Filtered Channel Playlist by TVG-ID Numbers
+        #DESCRIPTION:Auto-filtered playlist with specific TVG-ID numbers
+        EOF
+        
+        echo "" >> filtered_playlist.m3u
+        
+        # Get the TVG-ID numbers filter
+        TVG_ID_FILTER="${{ secrets.TVG_ID_NUMBERS }}"
+        
+        # Convert filter to array
+        read -a WANTED_IDS <<< "$TVG_ID_FILTER"
+        
+        FOUND_CHANNELS=0
+        PROCESSED_CHANNELS=0
+        
+        # Process the M3U file line by line
+        while IFS= read -r line; do
+          # Check if line is #EXTINF (channel info)
+          if [[ $line == "#EXTINF"* ]]; then
+            PROCESSED_CHANNELS=$((PROCESSED_CHANNELS + 1))
+            
+            # Extract tvg-id number from the line
+            if [[ $line =~ tvg-id=\"([^\"]*) ]]; then
+              CURRENT_TVG_ID="${BASH_REMATCH[1]}"
+              
+              # Check if this tvg-id number is in our wanted list
+              CHANNEL_WANTED=false
+              for wanted_id in "${WANTED_IDS[@]}"; do
+                if [[ "$CURRENT_TVG_ID" == "$wanted_id" ]]; then
+                  CHANNEL_WANTED=true
+                  break
+                fi
+              done
+              
+              if [[ "$CHANNEL_WANTED" == true ]]; then
+                # Extract channel name for better logging
+                CHANNEL_NAME="Unknown"
+                if [[ $line =~ ,([^,]+)$ ]]; then
+                  CHANNEL_NAME="${BASH_REMATCH[1]}"
+                fi
+                
+                echo "✅ Found TVG-ID $CURRENT_TVG_ID: $CHANNEL_NAME"
+                
+                # Add the #EXTINF line
+                echo "$line" >> filtered_playlist.m3u
+                
+                # Read the next line (should be the URL)
+                if IFS= read -r url_line; then
+                  echo "$url_line" >> filtered_playlist.m3u
+                  FOUND_CHANNELS=$((FOUND_CHANNELS + 1))
+                fi
+              else
+                # Skip the URL line for unwanted channels
+                IFS= read -r url_line
+              fi
+            else
+              echo "⚠️  No tvg-id found in: ${line:0:100}..."
+              # Skip the URL line
+              IFS= read -r url_line
+            fi
+          fi
+        done < source_playlist.m3u
+        
+        echo "=== FILTERING COMPLETE ==="
+        echo "🔍 Processed channels: $PROCESSED_CHANNELS"
+        echo "✅ Found matching TVG-ID numbers: $FOUND_CHANNELS"
+        echo "📺 Channels in filtered playlist: $(grep -c "^#EXTINF" filtered_playlist.m3u || echo "0")"
+        
+        # Show which TVG-ID numbers were found with channel names
+        echo "=== FOUND TVG-ID NUMBERS AND CHANNELS ==="
+        while IFS= read -r line; do
+          if [[ $line == "#EXTINF"* ]] && [[ $line =~ tvg-id=\"([^\"]*) ]]; then
+            TVG_ID="${BASH_REMATCH[1]}"
+            CHANNEL_NAME="Unknown"
+            if [[ $line =~ ,([^,]+)$ ]]; then
+              CHANNEL_NAME="${BASH_REMATCH[1]}"
+            fi
+            echo "🔢 TVG-ID: $TVG_ID - 📺 Channel: $CHANNEL_NAME"
+          fi
+        done < filtered_playlist.m3u
+        
+        # Check if we found any channels
+        if [ $FOUND_CHANNELS -eq 0 ]; then
+          echo "⚠️  WARNING: No matching TVG-ID numbers found!"
+          echo "🔍 Available TVG-ID numbers in source (first 30):"
+          grep "tvg-id=" source_playlist.m3u | head -30 | sed 's/.*tvg-id="\([^"]*\)".*/\1/' | sort -n | uniq
+          echo "📝 Make sure your TVG_ID_NUMBERS secret contains the correct numbers"
+        fi
+
+    - name: Check for changes
+      id: check_changes
+      run: |
+        TARGET_FILE="filtered_channels.m3u"
+        
+        if [ ! -f "$TARGET_FILE" ]; then
+          echo "🆕 Target file doesn't exist, will create it"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+        else
+          if ! cmp -s filtered_playlist.m3u "$TARGET_FILE"; then
+            echo "🔄 Changes detected in filtered playlist"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            
+            # Show detailed comparison
+            OLD_CHANNELS=$(grep -c "^#EXTINF" "$TARGET_FILE" || echo "0")
+            NEW_CHANNELS=$(grep -c "^#EXTINF" filtered_playlist.m3u || echo "0")
+            CHANNEL_DIFF=$((NEW_CHANNELS - OLD_CHANNELS))
+            
+            echo "=== CHANGES DETECTED ==="
+            echo "📺 Old channels: $OLD_CHANNELS"
+            echo "📺 New channels: $NEW_CHANNELS"
+            echo "📊 Channel difference: $CHANNEL_DIFF"
+            
+            # Show what changed
+            if [ -f "$TARGET_FILE" ]; then
+              echo "=== DETAILED CHANGES ==="
+              echo "🔄 Comparing old vs new TVG-IDs..."
+              
+              # Extract TVG-IDs from old file
+              grep "tvg-id=" "$TARGET_FILE" 2>/dev/null | sed 's/.*tvg-id="\([^"]*\)".*/\1/' | sort > old_tvg_ids.tmp
+              
+              # Extract TVG-IDs from new file
+              grep "tvg-id=" filtered_playlist.m3u | sed 's/.*tvg-id="\([^"]*\)".*/\1/' | sort > new_tvg_ids.tmp
+              
+              # Show added TVG-IDs
+              ADDED_IDS=$(comm -13 old_tvg_ids.tmp new_tvg_ids.tmp)
+              if [ ! -z "$ADDED_IDS" ]; then
+                echo "➕ Added TVG-IDs: $ADDED_IDS"
+              fi
+              
+              # Show removed TVG-IDs
+              REMOVED_IDS=$(comm -23 old_tvg_ids.tmp new_tvg_ids.tmp)
+              if [ ! -z "$REMOVED_IDS" ]; then
+                echo "➖ Removed TVG-IDs: $REMOVED_IDS"
+              fi
+              
+              # Cleanup temp files
+              rm -f old_tvg_ids.tmp new_tvg_ids.tmp
+            fi
+          else
+            echo "✅ No changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: Update filtered playlist file
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        # Move the filtered content to the target file
+        mv filtered_playlist.m3u filtered_channels.m3u
+        
+        FOUND_CHANNELS=$(grep -c "^#EXTINF" filtered_channels.m3u || echo "0")
+        echo "✅ filtered_channels.m3u updated successfully with $FOUND_CHANNELS channels"
+
+    - name: Commit and push changes
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Add the updated file
+        git add filtered_channels.m3u
+        
+        # Create detailed commit message
+        TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        CHANNEL_COUNT=$(grep -c "^#EXTINF" filtered_channels.m3u || echo "0")
+        FILE_SIZE=$(du -h filtered_channels.m3u | cut -f1)
+        
+        # Get TVG-ID numbers and channel names for commit message
+        TVG_ID_LIST=""
+        CHANNEL_NAMES=""
+        while IFS= read -r line; do
+          if [[ $line == "#EXTINF"* ]] && [[ $line =~ tvg-id=\"([^\"]*) ]]; then
+            TVG_ID="${BASH_REMATCH[1]}"
+            CHANNEL_NAME="Unknown"
+            if [[ $line =~ ,([^,]+)$ ]]; then
+              CHANNEL_NAME="${BASH_REMATCH[1]}"
+            fi
+            TVG_ID_LIST="$TVG_ID_LIST $TVG_ID"
+            CHANNEL_NAMES="$CHANNEL_NAMES $CHANNEL_NAME"
+          fi
+        done < filtered_channels.m3u
+        
+        git commit -m "🔢 Auto-update M3U Channels by TVG-ID Numbers - $TIMESTAMP
+
+        📺 Filtered Channels: $CHANNEL_COUNT
+        📁 File Size: $FILE_SIZE
+        🔢 TVG-IDs:$TVG_ID_LIST
+        📺 Channels:$CHANNEL_NAMES
+        🤖 Updated by GitHub Actions
+        ⏰ Last update: $TIMESTAMP"
+        
+        # Push changes
+        git push
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # Remove temporary files
+        rm -f source_playlist.m3u
+        rm -f filtered_playlist.m3u
+        rm -f old_tvg_ids.tmp
+        rm -f new_tvg_ids.tmp
+        
+        echo "🧹 Cleanup completed"
+
+    - name: Workflow summary
+      if: always()
+      run: |
+        echo "=== FINAL WORKFLOW SUMMARY ==="
+        echo "🏁 Status: ${{ job.status }}"
+        echo "🔄 Changes detected: ${{ steps.check_changes.outputs.has_changes }}"
+        echo "⏰ Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+        
+        if [ -f filtered_channels.m3u ]; then
+          CHANNEL_COUNT=$(grep -c "^#EXTINF" filtered_channels.m3u || echo "0")
+          FILE_SIZE=$(du -h filtered_channels.m3u | cut -f1)
+          
+          echo "📺 Current filtered channels: $CHANNEL_COUNT"
+          echo "📁 File size: $FILE_SIZE"
+          echo "=== CURRENT TVG-ID NUMBERS AND CHANNELS ==="
+          while IFS= read -r line; do
+            if [[ $line == "#EXTINF"* ]] && [[ $line =~ tvg-id=\"([^\"]*) ]]; then
+              TVG_ID="${BASH_REMATCH[1]}"
+              CHANNEL_NAME="Unknown"
+              if [[ $line =~ ,([^,]+)$ ]]; then
+                CHANNEL_NAME="${BASH_REMATCH[1]}"
+              fi
+              echo "🔢 $TVG_ID → 📺 $CHANNEL_NAME"
+            fi
+          done < filtered_channels.m3u
+        fi
+        
+        echo "✨ TVG-ID number based M3U playlist update completed!"
